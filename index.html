@@ -55,12 +55,13 @@
   <div id="bottom" class="card"></div>
 
   <script>
-    const WALK_TO_STATION = 8;   // minutes
+    const WALK_TO_STATION    = 7;       // minutes
+    const SEATAC_OFFSET_MS   = 1980000; // 33 min: Int'l Dist → SeaTac on 1 Line
+    const ONE_LINE_ROUTE_ID  = '40_100479';
     const API_KEY = 'TEST';
     const BASE = 'https://api.pugetsound.onebusaway.org/api/where';
 
     // Fixed travel-time offsets from Judkins Park, computed once from the timetable.
-    // Keys are milliseconds.
     let offsets = null;
 
     // ── API helpers ──────────────────────────────────────────────────────────
@@ -88,22 +89,28 @@
 
     // ── Timetable (one-time init) ────────────────────────────────────────────
 
-    // Returns the scheduled travel time in ms between two stops within a trip.
     function scheduleOffsetMs(stopTimes, fromId, toId) {
       const from = stopTimes.find(s => s.stopId === fromId);
       const to   = stopTimes.find(s => s.stopId === toId);
       return (from && to) ? (to.arrivalTime - from.arrivalTime) * 1000 : null;
     }
 
-    async function loadOffsets(westArrivals) {
-      const westEntry = await fetchTripEntry(westArrivals[0]?.tripId);
+    async function loadOffsets(westArrivals, eastArrivals) {
+      const [westEntry, eastEntry] = await Promise.all([
+        fetchTripEntry(westArrivals[0]?.tripId),
+        fetchTripEntry(eastArrivals[0]?.tripId),
+      ]);
+
       const wSt = westEntry?.schedule?.stopTimes ?? [];
+      const eSt = eastEntry?.schedule?.stopTimes ?? [];
 
       offsets = {
+        // Westbound 2 Line from Judkins Park
         intlDist:    scheduleOffsetMs(wSt, '40_E01-T1', '40_621'),
-        westlake:    scheduleOffsetMs(wSt, '40_E01-T1', '40_1121'),
         capitolHill: scheduleOffsetMs(wSt, '40_E01-T1', '40_99603')
                   ?? scheduleOffsetMs(wSt, '40_E01-T1', '40_99610'),
+        // Eastbound 2 Line from Judkins Park
+        eastMain:    scheduleOffsetMs(eSt, '40_E01-T2', '40_E11-T2'),
       };
     }
 
@@ -115,7 +122,6 @@
         : a.scheduledArrivalTime;
     }
 
-    // Returns the next train that arrives at the station after the walk.
     function nextCatchable(arrivals) {
       const now = Date.now();
       return arrivals
@@ -123,6 +129,15 @@
         .sort((a, b) => predictedMs(a) - predictedMs(b))
         .find(a => (predictedMs(a) - now) / 60000 >= WALK_TO_STATION)
         ?? null;
+    }
+
+    // Given the time you'd arrive at Int'l District, find the next 1 Line
+    // southbound departure and return its SeaTac arrival time.
+    function seaTacArrival(intlDistArrivals, intlDistArrivalMs) {
+      const next = intlDistArrivals
+        .filter(a => a.routeId === ONE_LINE_ROUTE_ID && predictedMs(a) >= intlDistArrivalMs)
+        .sort((a, b) => predictedMs(a) - predictedMs(b))[0];
+      return next ? predictedMs(next) + SEATAC_OFFSET_MS : null;
     }
 
     // ── Rendering ────────────────────────────────────────────────────────────
@@ -137,31 +152,44 @@
       return `<span class="green">${new Date(ms).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</span>`;
     }
 
-    function render(westArrivals) {
-      const now      = Date.now();
-      const westNext = nextCatchable(westArrivals);
+    function render(westArrivals, eastArrivals, intlDistArrivals) {
+      const now       = Date.now();
+      const westNext  = nextCatchable(westArrivals);
+      const eastNext  = nextCatchable(eastArrivals);
 
       const seattleWait = westNext
-        ? Math.round((predictedMs(westNext) - now) / 60000 - WALK_TO_STATION)
-        : null;
-
-      const wMs = westNext ? predictedMs(westNext) : null;
+        ? Math.round((predictedMs(westNext) - now) / 60000 - WALK_TO_STATION) : null;
+      const redmondWait = eastNext
+        ? Math.round((predictedMs(eastNext) - now) / 60000 - WALK_TO_STATION) : null;
 
       document.getElementById('top').innerHTML =
-        `<p>If Coburn leaves now, he would wait ${fmtWait(seattleWait)} for the Seattle train.</p>`;
+        `<p>If Coburn leaves now, he would wait ${fmtWait(seattleWait)} for the Seattle train and ${fmtWait(redmondWait)} for the Redmond train.</p>`;
+
+      const wMs = westNext ? predictedMs(westNext) : null;
+      const eMs = eastNext ? predictedMs(eastNext) : null;
 
       const stops = [];
-      if (wMs && offsets?.intlDist != null)
-        stops.push(`International District at ${fmtTime(wMs + offsets.intlDist)}`);
-      if (wMs && offsets?.westlake != null)
-        stops.push(`Westlake at ${fmtTime(wMs + offsets.westlake)}`);
+
+      if (wMs && offsets?.intlDist != null) {
+        const intlMs = wMs + offsets.intlDist;
+        stops.push({ label: 'International District', ms: intlMs });
+
+        const seaTacMs = seaTacArrival(intlDistArrivals, intlMs);
+        if (seaTacMs) stops.push({ label: 'SeaTac Airport', ms: seaTacMs });
+      }
+
       if (wMs && offsets?.capitolHill != null)
-        stops.push(`Capitol Hill at ${fmtTime(wMs + offsets.capitolHill)}`);
+        stops.push({ label: 'Capitol Hill', ms: wMs + offsets.capitolHill });
+
+      if (eMs && offsets?.eastMain != null)
+        stops.push({ label: 'East Main', ms: eMs + offsets.eastMain });
 
       if (stops.length) {
-        const last = stops.pop();
-        const sentence = stops.length
-          ? `He would get to ${stops.join(', ')}, and ${last}.`
+        stops.sort((a, b) => a.ms - b.ms);
+        const parts = stops.map(s => `${s.label} at ${fmtTime(s.ms)}`);
+        const last = parts.pop();
+        const sentence = parts.length
+          ? `He would get to ${parts.join(', ')}, and ${last}.`
           : `He would get to ${last}.`;
         document.getElementById('bottom').innerHTML = `<p>${sentence}</p>`;
       }
@@ -170,15 +198,23 @@
     // ── Startup & refresh loop ───────────────────────────────────────────────
 
     async function refresh() {
-      const westArrivals = await fetchArrivals('40_E01-T1');
-      render(westArrivals);
+      const [westArrivals, eastArrivals, intlDistArrivals] = await Promise.all([
+        fetchArrivals('40_E01-T1'),
+        fetchArrivals('40_E01-T2'),
+        fetchArrivals('40_623'),
+      ]);
+      render(westArrivals, eastArrivals, intlDistArrivals);
     }
 
     async function init() {
       try {
-        const westArrivals = await fetchArrivals('40_E01-T1');
-        await loadOffsets(westArrivals);
-        render(westArrivals);
+        const [westArrivals, eastArrivals, intlDistArrivals] = await Promise.all([
+          fetchArrivals('40_E01-T1'),
+          fetchArrivals('40_E01-T2'),
+          fetchArrivals('40_623'),
+        ]);
+        await loadOffsets(westArrivals, eastArrivals);
+        render(westArrivals, eastArrivals, intlDistArrivals);
         setInterval(refresh, 60000);
       } catch (err) {
         document.getElementById('top').textContent = `Error: ${err.message}`;
