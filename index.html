@@ -18,7 +18,7 @@
     }
 
     .card {
-      font-size: 1.4rem;
+      font-size: 0.7rem;
       color: #e0e0e0;
       text-align: center;
       background: rgba(0, 0, 0, 0.55);
@@ -163,7 +163,7 @@
         ? Math.round((predictedMs(eastNext) - now) / 60000 - WALK_TO_STATION) : null;
 
       document.getElementById('top').innerHTML =
-        `<p>If Coburn leaves now, he would wait ${fmtWait(seattleWait)} for the Seattle train and ${fmtWait(redmondWait)} for the Redmond train.</p>`;
+        `<p>If Lola leaves now, she would wait ${fmtWait(seattleWait)} for the Seattle train and ${fmtWait(redmondWait)} for the Redmond train.</p>`;
 
       const wMs = westNext ? predictedMs(westNext) : null;
       const eMs = eastNext ? predictedMs(eastNext) : null;
@@ -184,14 +184,17 @@
       if (eMs && offsets?.eastMain != null)
         stops.push({ label: 'East Main', ms: eMs + offsets.eastMain });
 
+      const bottom = document.getElementById('bottom');
       if (stops.length) {
         stops.sort((a, b) => a.ms - b.ms);
         const parts = stops.map(s => `${s.label} at ${fmtTime(s.ms)}`);
         const last = parts.pop();
         const sentence = parts.length
-          ? `He would get to ${parts.join(', ')}, and ${last}.`
-          : `He would get to ${last}.`;
-        document.getElementById('bottom').innerHTML = `<p>${sentence}</p>`;
+          ? `She would get to ${parts.join(', ')}, and ${last}.`
+          : `She would get to ${last}.`;
+        bottom.innerHTML = `<p>${sentence}</p>`;
+      } else {
+        bottom.innerHTML = '';
       }
     }
 
