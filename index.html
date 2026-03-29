@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Judkins Park Train</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #111 url('bg.png') center/cover no-repeat;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      align-items: stretch;
+      min-height: 100vh;
+      margin: 0;
+      padding: 0;
+    }
+
+    .card {
+      font-size: 1.4rem;
+      color: #e0e0e0;
+      text-align: center;
+      background: rgba(0, 0, 0, 0.55);
+      padding: 12px 20px;
+      backdrop-filter: blur(6px);
+    }
+
+    .card p {
+      margin: 0;
+    }
+
+    @media (max-width: 768px) {
+      body {
+        background-size: auto 75vh;
+        background-position: center top;
+      }
+
+      #bottom {
+        position: fixed;
+        bottom: 0;
+        left: 0;
+        right: 0;
+      }
+    }
+
+    .green {
+      color: #4cd964;
+      font-weight: 600;
+    }
+  </style>
+</head>
+<body>
+  <div id="top" class="card">Loading…</div>
+  <div id="bottom" class="card"></div>
+
+  <script>
+    const WALK_TO_STATION = 8;   // minutes
+    const API_KEY = 'TEST';
+    const BASE = 'https://api.pugetsound.onebusaway.org/api/where';
+
+    // Fixed travel-time offsets from Judkins Park, computed once from the timetable.
+    // Keys are milliseconds.
+    let offsets = null;
+
+    // ── API helpers ──────────────────────────────────────────────────────────
+
+    async function fetchArrivals(stopId) {
+      const res = await fetch(
+        `${BASE}/arrivals-and-departures-for-stop/${stopId}.json` +
+        `?key=${API_KEY}&minutesBefore=0&minutesAfter=90`
+      );
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      return data?.data?.entry?.arrivalsAndDepartures ?? [];
+    }
+
+    const tripCache = {};
+    async function fetchTripEntry(tripId) {
+      if (!tripId) return null;
+      if (tripCache[tripId]) return tripCache[tripId];
+      const res = await fetch(`${BASE}/trip-details/${tripId}.json?key=${API_KEY}`);
+      if (!res.ok) return null;
+      const entry = (await res.json())?.data?.entry ?? null;
+      if (entry) tripCache[tripId] = entry;
+      return entry;
+    }
+
+    // ── Timetable (one-time init) ────────────────────────────────────────────
+
+    // Returns the scheduled travel time in ms between two stops within a trip.
+    function scheduleOffsetMs(stopTimes, fromId, toId) {
+      const from = stopTimes.find(s => s.stopId === fromId);
+      const to   = stopTimes.find(s => s.stopId === toId);
+      return (from && to) ? (to.arrivalTime - from.arrivalTime) * 1000 : null;
+    }
+
+    async function loadOffsets(westArrivals) {
+      const westEntry = await fetchTripEntry(westArrivals[0]?.tripId);
+      const wSt = westEntry?.schedule?.stopTimes ?? [];
+
+      offsets = {
+        intlDist:    scheduleOffsetMs(wSt, '40_E01-T1', '40_621'),
+        westlake:    scheduleOffsetMs(wSt, '40_E01-T1', '40_1121'),
+        capitolHill: scheduleOffsetMs(wSt, '40_E01-T1', '40_99603')
+                  ?? scheduleOffsetMs(wSt, '40_E01-T1', '40_99610'),
+      };
+    }
+
+    // ── Real-time logic ──────────────────────────────────────────────────────
+
+    function predictedMs(a) {
+      return a.predicted && a.predictedArrivalTime > 0
+        ? a.predictedArrivalTime
+        : a.scheduledArrivalTime;
+    }
+
+    // Returns the next train that arrives at the station after the walk.
+    function nextCatchable(arrivals) {
+      const now = Date.now();
+      return arrivals
+        .filter(a => predictedMs(a) > 0)
+        .sort((a, b) => predictedMs(a) - predictedMs(b))
+        .find(a => (predictedMs(a) - now) / 60000 >= WALK_TO_STATION)
+        ?? null;
+    }
+
+    // ── Rendering ────────────────────────────────────────────────────────────
+
+    function fmtWait(mins) {
+      if (mins === null) return 'no trains found';
+      if (mins === 0) return '<span class="green">no wait</span>';
+      return `<span class="green">${mins} minute${mins === 1 ? '' : 's'}</span>`;
+    }
+
+    function fmtTime(ms) {
+      return `<span class="green">${new Date(ms).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</span>`;
+    }
+
+    function render(westArrivals) {
+      const now      = Date.now();
+      const westNext = nextCatchable(westArrivals);
+
+      const seattleWait = westNext
+        ? Math.round((predictedMs(westNext) - now) / 60000 - WALK_TO_STATION)
+        : null;
+
+      const wMs = westNext ? predictedMs(westNext) : null;
+
+      document.getElementById('top').innerHTML =
+        `<p>If Coburn leaves now, he would wait ${fmtWait(seattleWait)} for the Seattle train.</p>`;
+
+      const stops = [];
+      if (wMs && offsets?.intlDist != null)
+        stops.push(`International District at ${fmtTime(wMs + offsets.intlDist)}`);
+      if (wMs && offsets?.westlake != null)
+        stops.push(`Westlake at ${fmtTime(wMs + offsets.westlake)}`);
+      if (wMs && offsets?.capitolHill != null)
+        stops.push(`Capitol Hill at ${fmtTime(wMs + offsets.capitolHill)}`);
+
+      if (stops.length) {
+        const last = stops.pop();
+        const sentence = stops.length
+          ? `He would get to ${stops.join(', ')}, and ${last}.`
+          : `He would get to ${last}.`;
+        document.getElementById('bottom').innerHTML = `<p>${sentence}</p>`;
+      }
+    }
+
+    // ── Startup & refresh loop ───────────────────────────────────────────────
+
+    async function refresh() {
+      const westArrivals = await fetchArrivals('40_E01-T1');
+      render(westArrivals);
+    }
+
+    async function init() {
+      try {
+        const westArrivals = await fetchArrivals('40_E01-T1');
+        await loadOffsets(westArrivals);
+        render(westArrivals);
+        setInterval(refresh, 60000);
+      } catch (err) {
+        document.getElementById('top').textContent = `Error: ${err.message}`;
+      }
+    }
+
+    init();
+  </script>
+</body>
+</html>
